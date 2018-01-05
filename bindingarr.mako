@@ -1,9 +1,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/operators.h>
+#include <pybind11/stl.h> // For array
 #include <memory>
 
 <%
+import re
 #Global declarations:
 def varsafe(s):
     return s.replace('::','_').replace('<','_').replace('>','').replace(' ','_')
@@ -25,7 +27,6 @@ def type(t):
     
 def construct(t):
     t = type(t)
-    #TODO: must not use stripped type for the pointer version, as const char* != char*
     return ('((%s)0)' % t )if t[-1] == '*' else (t + '()')
 
 %>\
@@ -92,10 +93,26 @@ auto ${pyns} = py::class_<${fakemodule}>(m, "${name}")
     ptr = '&%s::%s' % (ns['full-namespace'], var)
     isarray = v['type'][-1] == ']'
     if isarray:
-        pass #todo: finish
+        t = re.match(r'(.*?)\[',v['type']).group(1)
+        matches = re.compile(r'\[(\d+)\]').findall(v['type'])
+        arr_size = []
+#        def wrap_array(old,n):
+#            return 'std::array<%s,%n>' % old,n
+        arrstr = t
+        for m in matches:
+            arr_size.append(int(m.group(1)))
+#            arrstr=wrap_array(arrstr,arr_size[-1])
+        getter = '[]() {{ return std::vector<{0}>({1}::{2}, {1}::{2} + {3}); }}'.format(t,ns['full-namespace'],var,arr_size[-1])
+        setter = '[](std::array<{0}, {3}> a) {{ for (unsigned i=0; i<{3}; ++i) {1}::{2}[i] = a[i]; }}'.format(t,ns['full-namespace'],var,arr_size[-1])
+        # std::copy(std::begin(src), std::end(src), std::begin(dest))
+        #see https://github.com/pybind/pybind11/issues/942
 %>\
-% if not v['reference'] and not isarray: ##Cannot take address of reference
-% if v['const']:
+% if not v['reference']: ##Cannot take address of reference
+% if isarray and v['const']:
+  .def_property_readonly_static("${var}", ${getter}, "todo: arr ro prop docstring")
+% elif isarray:
+  .def_property_static("${var}", ${getter}, ${setter}, "todo: arr prop docstring")
+% elif v['const']:
   .def_readonly_static("${var}", ${ptr}, "todo: var docstring")
 % else:
   .def_readwrite_static("${var}", ${ptr}, "todo: var docstring")
@@ -137,7 +154,7 @@ auto ${pyns} = m
 % endif
   // Namespace vars class ${name}
 
-  // Forward-declare class variables TODO: Must be moved before functions and attributes of namespace
+  // Declare class variables
 % for cls in ns['classes']:
 <% 
     classname = cls['classname']
@@ -150,8 +167,8 @@ auto ${pyns} = m
     baseclass = ('pyclass_' + 'Var_' + varsafe(cls['outer'][-1])) if cls['outer'] else pyns
     ptrclass = (', SharedPtr<%s>' % fullclass) if cls['ref-counted'] else ''
     inherits = ''.join([', ' + x['base'] for x in cls['inherits'] ])
-#    print (fullclass, ptrclass, inherits)
-#    print fullclass + ptrclass + inherits
+    print (fullclass, ptrclass, inherits)
+    print fullclass + ptrclass + inherits
 %>// Class ${classname}
 auto ${pyclass} = py::class_<${fullclass + ptrclass + inherits}>(${baseclass}, "${classname}", "test doc");
 % endfor #Class Pre-registration
@@ -172,8 +189,10 @@ auto ${pyclass} = py::class_<${fullclass + ptrclass + inherits}>(${baseclass}, "
 % if cls.has_key('ctors'):
   // Constructors
 % for fn in cls['ctors']:
-% if not(fn.has_key('variadic') or len(fn['pointer-count']) > 1 or fn.has_key('friend')):
+% if not(fn.has_key('variadic') or len(fn['pointer-count']) > 1 or fn['friend']):
   .def(py::init<${fn['arg-types']}>(), "todo: docstring")
+% else:
+    //no ctor ptr-count:${len(fn['pointer-count'])}, friend: ${fn['friend']}, variadic: ${fn.has_key('variadic')}
 % endif
 % endfor
 % else: ## Assume that it is default constructed
@@ -195,7 +214,7 @@ auto ${pyclass} = py::class_<${fullclass + ptrclass + inherits}>(${baseclass}, "
         else:
             args += ', py::arg("%s")' % arg['name']
 %>\
-% if not(fn.has_key('variadic') or len(fn['pointer-count']) > 1 or fn.has_key('friend')):
+% if not(fn.has_key('variadic') or len(fn['pointer-count']) > 1 or fn['friend']):
     % if fn['static']:
   .def_static("${func}", ${fnptr}, "todo: docstring"${args})
     % else:
@@ -263,10 +282,33 @@ auto ${pyclass} = py::class_<${fullclass + ptrclass + inherits}>(${baseclass}, "
 <% 
     var = v['var']
     ptr = '&%s::%s' % (fullclass, var)
-    isarray = v['type'][-1] == ']'
-    ptr2 = '**' in v['type']
+    isarray = v['type'][-1] == ']' # see above for more details
+    if isarray:
+        t = re.match(r'(.*?)\[',v['type']).group(1)
+        matches = re.compile(r'\[(\d+)\]').findall(v['type'])
+        arr_size = []
+        arrstr = t
+        for m in matches:
+            arr_size.append(int(m))
+        sgetter = '[]() {{ return std::vector<{0}>({1}::{2}, {1}::{2} + {3}); }}'.format(t,fullclass,var,arr_size[-1])
+        ssetter = '[](std::array<{0}, {3}> a) {{ for (unsigned i=0; i<{3}; ++i) {1}::{2}[i] = a[i]; }}'.format(t,fullclass,var,arr_size[-1])
+        getter = '[](const {1}& obj) {{ return std::vector<{0}>(obj.{2}, obj.{2} + {3}); }}'.format(t,fullclass,var,arr_size[-1])
+        setter = '[]({1}& obj, std::array<{0}, {3}> a) {{ for (unsigned i=0; i<{3}; ++i) obj.{2}[i] = a[i]; }}'.format(t,fullclass,var,arr_size[-1])
+        # std::copy(std::begin(src), std::end(src), std::begin(dest))
+        #see https://github.com/pybind/pybind11/issues/942
 %>\
-% if not v['reference'] and not isarray and not ptr2: ##Cannot take address of reference
+% if not v['reference']: ##Cannot take address of reference
+% if isarray:
+% if v['const'] and v['static']:
+  .def_property_readonly_static("${var}", ${sgetter}, "todo: arr ro prop docstring")
+% elif v['static']:
+  .def_property_static("${var}", ${sgetter}, ${ssetter}, "todo: arr prop docstring")
+% elif v['const']:
+  .def_property+_readonly("${var}", ${getter}, "todo: arr ro prop docstring")
+% else:
+  .def_property("${var}", ${getter}, ${setter}, "todo: arr prop docstring")
+% endif
+% else:
 % if v['const'] and v['static']:
   .def_readonly_static("${var}", ${ptr}, "todo: var docstring")
 % elif v['static']:
@@ -275,6 +317,7 @@ auto ${pyclass} = py::class_<${fullclass + ptrclass + inherits}>(${baseclass}, "
   .def_readonly("${var}", ${ptr}, "todo: var docstring")
 % else:
   .def_readwrite("${var}", ${ptr}, "todo: var docstring")
+% endif
 % endif
 % else:
  // Cannot bind ${ptr} TODO: def_property with lambdas for it

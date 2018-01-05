@@ -388,6 +388,14 @@ def is_friend(node):
     return False
 
 
+def is_visible(node):
+    for c in node.get_children():
+        if c.kind is clang.cindex.CursorKind.VISIBILITY_ATTR:
+            if c.spelling == 'default':
+                return True
+    return False
+
+
 #use for methods and functions (CXX_METHOD vs FUNCTION_DECL
 def get_function(node, class_dict):
     if not (node.kind is clang.cindex.CursorKind.CXX_METHOD or
@@ -513,7 +521,7 @@ def get_function(node, class_dict):
         o = op.group(1)
         print o
         function['op'] = o
-        #TODO:
+        #TODO: ? and Visibility of symbols
         print node.displayname
         function['op-func'] = op_functions[o] #Things like __MUL_FUNC__, etc.
         function[op_names[o]] = op_names[o] # e.g. function['equality'] = 'equality' for ==
@@ -604,6 +612,9 @@ def get_function(node, class_dict):
 
     # FUNCTIONS
     elif node.kind is clang.cindex.CursorKind.FUNCTION_DECL:
+        if not is_visible(node):
+            print 'Found hidden ' + node.displayname
+            return
         function['ret'] = node.result_type.spelling
         class_dict['functions'].append(function)
 
@@ -614,7 +625,10 @@ def get_function(node, class_dict):
 
 
 skip_classes = [
-    'Urho3D::PhysicsWorld2D::ContactInfo'
+    # 'Urho3D::PhysicsWorld2D::ContactInfo',
+    'Urho3D::CScriptArray',
+    'Urho3D::CScriptDictionary',
+    'Urho3D::CScriptDictionary::CIterator',
 ]
 
 inheritance_hierarchy = {}
@@ -629,6 +643,9 @@ def get_class(node, ns, outer=None):
             return
         if len([c for c in node.get_children()]) == 0:
             print "Skipping empty class " + node.type.get_canonical().spelling
+            return
+        if not is_visible(node):
+            print 'Found hidden ' + node.displayname
             return
         cls = dict()
         cls['class'] = node.type.get_canonical().spelling
@@ -796,8 +813,11 @@ def fill_inheritance_heirarchy():
     def add_base(key, base):
         if base not in full[key]:
             full[key].append(base)
-            for newbase in inheritance_hierarchy[base]:
-                add_base(key, newbase)
+            if base in inheritance_hierarchy:
+                for newbase in inheritance_hierarchy[base]:
+                    add_base(key, newbase)
+            else:
+                print "Could not find %s in inheritance heirarchy. Looking on behalf of %s." % (base, key)
 
     #for every class
     for key in inheritance_hierarchy:
